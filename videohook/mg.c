@@ -7,6 +7,12 @@
  * are copied into the game's own back buffer right before it presents.
  * Everything else (session, audio, timing, skipping) is the real MF.dll.
  *
+ * To behave like the EVR the game expects, the sink also answers
+ * MR_VIDEO_RENDER_SERVICE (Wine's session only finds its own EVR, so
+ * MFGetService is wrapped) and implements GetCurrentImage. When you press
+ * Enter, the game grabs frames itself and draws them under its skip prompt;
+ * when paused it shows its own frame. We stop drawing in both cases.
+ *
  * The exe's import "MF.dll" is renamed to "MG.dll" (see install.sh), so this
  * file is loaded instead. A log goes to videohook.log next to the exe.
  */
@@ -102,7 +108,7 @@ static void release_surf(void)
     if (surf) { IDirect3DSurface9_Release(surf); surf = NULL; }
 }
 
-static int drawn_this_frame, trace_frames;
+
 static void draw_video(IDirect3DDevice9 *dev, const char *via)
 {
     if (!playing) { release_surf(); return; }
@@ -113,7 +119,6 @@ static void draw_video(IDirect3DDevice9 *dev, const char *via)
     /* the game is drawing the frames itself (skip prompt over the movie) */
     if (last_grab && GetTickCount() - last_grab < 300) return;
     if (logged_present < 3) { LOG("drawing via %s", via); logged_present++; }
-    drawn_this_frame = 1;
     EnterCriticalSection(&framelock);
     if (surf && (sw != fw || sh != fh)) release_surf();
     if (!surf) {
@@ -125,7 +130,7 @@ static void draw_video(IDirect3DDevice9 *dev, const char *via)
     }
     if (frame_dirty) {
         D3DLOCKED_RECT lr;
-        if (SUCCEEDED(IDirect3DSurface9_LockRect(surf, &lr, NULL, D3DLOCK_DISCARD))) {
+        if (SUCCEEDED(IDirect3DSurface9_LockRect(surf, &lr, NULL, 0))) {
             for (UINT y = 0; y < fh; y++)
                 memcpy((BYTE *)lr.pBits + y * lr.Pitch, frame + y * fw * 4, fw * 4);
             IDirect3DSurface9_UnlockRect(surf);
@@ -146,63 +151,11 @@ static void draw_video(IDirect3DDevice9 *dev, const char *via)
     IDirect3DSurface9_Release(bb);
 }
 
-/* Insert the movie right after the game's first draw onto the back buffer
- * (its background), so whatever it draws afterwards (skip prompt etc.)
- * stays on top. Present is only the fallback. */
-typedef HRESULT (WINAPI *DP_t)(IDirect3DDevice9 *, D3DPRIMITIVETYPE, UINT, UINT);
-typedef HRESULT (WINAPI *DIP_t)(IDirect3DDevice9 *, D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT);
-typedef HRESULT (WINAPI *DPUP_t)(IDirect3DDevice9 *, D3DPRIMITIVETYPE, UINT, const void *, UINT);
-typedef HRESULT (WINAPI *DIPUP_t)(IDirect3DDevice9 *, D3DPRIMITIVETYPE, UINT, UINT, UINT, const void *, D3DFORMAT, const void *, UINT);
-static DP_t oDP; static DIP_t oDIP; static DPUP_t oDPUP; static DIPUP_t oDIPUP;
-static int draw_idx;
-static BOOL rt_is_backbuffer(IDirect3DDevice9 *dev)
-{
-    IDirect3DSurface9 *rt = NULL, *bb = NULL; BOOL r = FALSE;
-    if (SUCCEEDED(IDirect3DDevice9_GetRenderTarget(dev, 0, &rt)) &&
-        SUCCEEDED(IDirect3DDevice9_GetBackBuffer(dev, 0, 0, D3DBACKBUFFER_TYPE_MONO, &bb))) r = rt == bb;
-    if (rt) IDirect3DSurface9_Release(rt);
-    if (bb) IDirect3DSurface9_Release(bb);
-    return r;
-}
-static void after_draw(IDirect3DDevice9 *dev, const char *kind, UINT prims)
-{
-    if (!playing || !frame) return;
-    BOOL onbb = rt_is_backbuffer(dev);
-    if (trace_frames < 4) {
-        IDirect3DBaseTexture9 *t = NULL; D3DSURFACE_DESC d = {0};
-        if (SUCCEEDED(IDirect3DDevice9_GetTexture(dev, 0, &t)) && t) {
-            if (IDirect3DBaseTexture9_GetType(t) == D3DRTYPE_TEXTURE)
-                IDirect3DTexture9_GetLevelDesc((IDirect3DTexture9 *)t, 0, &d);
-            IDirect3DBaseTexture9_Release(t);
-        }
-        LOG("  frame %d draw %d: %s prims=%u rt=%s tex0=%ux%u", trace_frames, draw_idx, kind, prims,
-            onbb ? "backbuffer" : "offscreen", d.Width, d.Height);
-    }
-    draw_idx++;
-    (void)onbb;
-}
-static HRESULT WINAPI hDP(IDirect3DDevice9 *d, D3DPRIMITIVETYPE t, UINT a, UINT n)
-{ HRESULT hr = oDP(d, t, a, n); after_draw(d, "DP", n); return hr; }
-static HRESULT WINAPI hDIP(IDirect3DDevice9 *d, D3DPRIMITIVETYPE t, INT a, UINT b, UINT c, UINT e, UINT n)
-{ HRESULT hr = oDIP(d, t, a, b, c, e, n); after_draw(d, "DIP", n); return hr; }
-static HRESULT WINAPI hDPUP(IDirect3DDevice9 *d, D3DPRIMITIVETYPE t, UINT n, const void *v, UINT st)
-{ HRESULT hr = oDPUP(d, t, n, v, st); after_draw(d, "DPUP", n); return hr; }
-static HRESULT WINAPI hDIPUP(IDirect3DDevice9 *d, D3DPRIMITIVETYPE t, UINT a, UINT b, UINT n, const void *i, D3DFORMAT f, const void *v, UINT st)
-{ HRESULT hr = oDIPUP(d, t, a, b, n, i, f, v, st); after_draw(d, "DIPUP", n); return hr; }
-
-static WNDPROC oMovieProc;
-static LRESULT CALLBACK movie_proc(HWND h, UINT m, WPARAM w, LPARAM l)
-{
-    if ((m >= WM_KEYFIRST && m <= WM_KEYLAST) || (m >= WM_MOUSEFIRST && m <= WM_MOUSELAST && m != WM_MOUSEMOVE)
-        || m == WM_SETFOCUS || m == WM_KILLFOCUS || m == WM_SHOWWINDOW || m == WM_INPUT)
-        LOG("movie wnd msg %04x w=%lx", m, (long)w);
-    return CallWindowProcA(oMovieProc, h, m, w, l);
-}
+/* The movie is drawn over the finished frame right before it is presented,
+ * unless the game paused it or is drawing it itself (see draw_video). */
 static void end_frame(IDirect3DDevice9 *dev, const char *via)
 {
-    if (!drawn_this_frame) draw_video(dev, via);
-    if (playing && frame && trace_frames < 4) LOG("  frame %d end (%d draws)", trace_frames++, draw_idx);
-    drawn_this_frame = 0; draw_idx = 0;
+    draw_video(dev, via);
 }
 static HRESULT WINAPI hPresent(IDirect3DDevice9 *dev, const RECT *a, const RECT *b, HWND w, const RGNDATA *r)
 { end_frame(dev, "Present"); return oPresent(dev, a, b, w, r); }
@@ -235,10 +188,6 @@ static void hook_device(IDirect3DDevice9 *dev, BOOL ex)
     IDirect3DDevice9ExVtbl *vt = (IDirect3DDevice9ExVtbl *)dev->lpVtbl;
     patch((void **)&vt->Present, hPresent, (void **)&oPresent);
     patch((void **)&vt->Reset, hReset, (void **)&oReset);
-    patch((void **)&vt->DrawPrimitive, hDP, (void **)&oDP);
-    patch((void **)&vt->DrawIndexedPrimitive, hDIP, (void **)&oDIP);
-    patch((void **)&vt->DrawPrimitiveUP, hDPUP, (void **)&oDPUP);
-    patch((void **)&vt->DrawIndexedPrimitiveUP, hDIPUP, (void **)&oDIPUP);
     if (ex) {
         patch((void **)&vt->PresentEx, hPresentEx, (void **)&oPresentEx);
         patch((void **)&vt->ResetEx, hResetEx, (void **)&oResetEx);
@@ -628,7 +577,6 @@ static HRESULT WINAPI cs_OnClockStart(IMFClockStateSink *p, MFTIME sys, LONGLONG
     IMFMediaEventQueue_QueueEventParamVar(s->events, MEStreamSinkStarted, &GUID_NULL, S_OK, NULL);
     LeaveCriticalSection(&s->cs);
     movie_hwnd = s->hwnd; paused = 0;
-    trace_frames = 4; /* draw tracing off */
     LOG("clock start");
     return S_OK;
 }
