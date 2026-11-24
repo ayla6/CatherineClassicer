@@ -1,48 +1,50 @@
 # CatherineClassicer
 
-Scripts to shrink a Catherine Classic (PC) install on btrfs. They don't delete
-anything: duplicate files become reflinks, so they share the same blocks on disk.
+Fixes and space savings for Catherine Classic (PC) on Linux/Proton: dedupe the
+install on btrfs, rebuild the cutscenes from the PS3 masters, fix the movie
+flicker on NVIDIA, and a few exe patches.
 
 Requires: btrfs, GNU coreutils `cp`, python3. Game dir defaults to
 `/var/data/Games/common/Catherine Classic`; pass another path as the last argument.
-Every script supports `--dry-run`.
+
+## Dedupe (`dedupe-identical.py`)
+
+Duplicate files become reflinks, so they share the same blocks on disk; nothing
+is deleted. Supports `--dry-run`.
 
 ```sh
-./replace-x2.sh            # _x2 textures/sprites -> reflink of 1x (~2.5 GB)
 ./dedupe-identical.py      # byte-identical files in data/ (~1.6 GB)
 btrfs filesystem du -s "/var/data/Games/common/Catherine Classic/data"
 ```
-
-Run `replace-x2.sh` first: afterwards each `_x2` file is identical to its base,
-and the dedupe pass sees nothing extra to do.
 
 The dedupe script can't tell whether files are already reflinked, so on an
 install that's already done it still lists every duplicate. Re-linking them is
 harmless. Use `btrfs filesystem du` to see what's actually shared.
 
-## What and why
+### What gets deduped
 
 - **movie / movie_jp, movie2 / movie2_jp:** 52 videos are byte-identical across
   languages (~1.2 GB). The rest are separate encodes (JP has extra frames and
   different lip-sync), so they can't be deduplicated. `151_00.wmv` exists only in `movie_jp`.
 - **sound / sound_jp:** 98 files are identical (~350 MB). The voiced `evv_*`/`evt_*` files differ.
 - **`*_x2.dds` (303) and `*_x2.sp2` (284):** 2x UI assets for 1440p/4K. They're
-  upscales and look worse, so they're replaced with the 1x versions. This is the
-  risky part: fonts (`data/font/*_x2.dds`) and sprite sheets could render wrong.
-  Restore single files from a backup if something breaks.
+  upscales and look worse. You can just delete them (~2.5 GB): with the `x2`
+  exe patch (`patch.py`, below) the game then loads the 1x versions correctly.
 - **Misc duplicates:** ~95 small ones (sound banks, models, textures), ~47 MB.
 - `data/test` and `EXTRAS` are left alone on purpose.
 
 Space is only freed once nothing else (such as a snapshot) still references the old blocks.
 
-Steam "verify files" will undo the `_x2` swap. The reflinked identical files stay
-correct, though, because their contents are unchanged.
+Steam "verify files" brings back the `_x2` files and the original exe (re-run
+`patch.py`). The reflinked identical files stay correct, because their contents
+are unchanged.
 
 ## Cutscenes from the PS3 masters (`movies.py`)
 
 The PC videos are 30 fps re-encodes of the PS3 masters, with padded frames,
 a lower bitrate and flattened levels. `movies.py` rebuilds them from the PS3
-`.pam` files as HEVC (x265 10-bit, medium, CRF 18, no SAO) + original audio in an MP4 named `.wmv`. The game plays
+`.pam` files as HEVC (x265 10-bit, medium, CRF 18, no SAO) + original audio
+in an MP4 named `.wmv`. The game plays
 these under Proton, because GStreamer detects the format from the contents.
 English and JP files share one video stream, deduped on btrfs.
 
@@ -78,14 +80,26 @@ movies don't play there at all, hook or not.
 
 ```sh
 videohook/build.sh        # builds mg.dll in the "fedora" distrobox (mingw32-gcc)
-videohook/install.sh      # mg.dll + exe import MF.dll -> MG.dll + quote patch; backup Catherine.exe.orig
-videohook/install.sh --revert
+./patch.py                # installs it (see below)
+./patch.py --revert
 ```
 `videohook.log` next to the exe logs each movie. Touch `videohook.passthrough`
 in the game dir to use the real EVR again (for comparing).
 
-## Quote screens (`patch-quotes.py`)
+## Exe patches (`patch.py`)
 
-Loading screens with a quote stay up at least 5 s even when loading is done
-(state machine at 0x63520f). The patch points that 5.0 at a -0.0 constant so
-they fade out right away; quote #99 keeps its 7 s.
+`patch.py [--no-mg] [--no-x2] [--quotes] [GAME_DIR]` finds the original exe
+(whichever of `Catherine.exe` / `Catherine.exe.orig` has the known SHA-256),
+keeps it as `Catherine.exe.orig`, writes a patched `Catherine.exe` and copies
+`videohook/mg.dll` next to it. `--revert` puts the original back and removes mg.dll.
+It always starts from the original, so it's safe to re-run with other flags.
+
+- **mg** (default): import `MF.dll` -> `MG.dll` + copy mg.dll, for the movie hook above.
+- **x2** (default): with hi-res assets on, the path resolver at 0x63c840
+  falls back from `name_x2.dds/.sp2` to `name.ext` but still reports "x2", so
+  the 1x fallback's texture coords get halved. The patch makes it report
+  whether the `_x2` file actually exists, so you can delete `_x2` files and
+  the game loads the 1x ones correctly.
+- **quotes** (opt-in): quote loading screens stay up at least 5 s even when
+  loading is done (state machine at 0x63520f). This points that 5.0 at a
+  -0.0 constant so they fade out right away; quote #99 keeps its 7 s.

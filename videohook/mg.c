@@ -13,7 +13,7 @@
  * Enter, the game grabs frames itself and draws them under its skip prompt;
  * when paused it shows its own frame. We stop drawing in both cases.
  *
- * The exe's import "MF.dll" is renamed to "MG.dll" (see install.sh), so this
+ * The exe's import "MF.dll" is renamed to "MG.dll" (see patch.py), so this
  * file is loaded instead. A log goes to videohook.log next to the exe.
  */
 #define COBJMACROS
