@@ -62,6 +62,10 @@ English and JP files share one video stream, deduped on btrfs.
 - `tools/mp4_flatten.py` puts the video first at a 4K-aligned offset, so the
   EN/JP video blocks match. `movies.py dedupe` shares them with FIDEDUPERANGE.
 
+Only works on a Proton whose Media Foundation decodes through GStreamer
+(tested: proton-cachyos 11). GE-Proton's newer winedmo pipeline has no
+HEVC/AC-3 decoders and froze even on H.264 + Opus test files, so the HEVC
+movies don't play there at all.
 
 ## Movie flicker on NVIDIA (`videohook/`)
 
@@ -72,11 +76,6 @@ renderer: decoded frames are drawn into the game's own back buffer at
 Present, and `GetCurrentImage` feeds the game's own movie texture (skip
 prompt, pause background, subtitles, cursor). The real MF.dll still handles
 decoding, audio and timing.
-
-Only works on a Proton whose Media Foundation decodes through GStreamer
-(tested: proton-cachyos 11). GE-Proton's newer winedmo pipeline has no
-HEVC/AC-3 decoders and froze even on H.264 + Opus test files, so the HEVC
-movies don't play there at all, hook or not.
 
 ```sh
 videohook/build.sh        # builds mg.dll in the "fedora" distrobox (mingw32-gcc)
