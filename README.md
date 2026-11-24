@@ -88,7 +88,7 @@ in the game dir to use the real EVR again (for comparing).
 
 ## Exe patches (`patch.py`)
 
-`patch.py [--no-mg] [--no-x2] [--quotes] [GAME_DIR]` finds the original exe
+`patch.py [--no-mg] [--no-x2] [--no-logos] [--quotes] [GAME_DIR]` finds the original exe
 (whichever of `Catherine.exe` / `Catherine.exe.orig` has the known SHA-256),
 keeps it as `Catherine.exe.orig`, writes a patched `Catherine.exe` and copies
 `videohook/mg.dll` next to it. `--revert` puts the original back and removes mg.dll.
@@ -100,6 +100,8 @@ It always starts from the original, so it's safe to re-run with other flags.
   the 1x fallback's texture coords get halved. The patch makes it report
   whether the `_x2` file actually exists, so you can delete `_x2` files and
   the game loads the 1x ones correctly.
+- **logos** (default): skips the boot logos and goes straight to the title
+  screen (title state machine at 0x5e5330).
 - **quotes** (opt-in): quote loading screens stay up at least 5 s even when
   loading is done (state machine at 0x63520f). This points that 5.0 at a
   -0.0 constant so they fade out right away; quote #99 keeps its 7 s.

@@ -85,6 +85,9 @@ static CRITICAL_SECTION framelock;
 static BYTE *frame;            /* w*h*4, top-down BGRX */
 static UINT fw, fh;
 static volatile LONG frame_dirty, playing;
+/* a sample arrived since the clock last started/paused/stopped; keeps a stale
+ * frame from the previous state from flashing up (e.g. one frame after a skip) */
+static volatile LONG fresh;
 static IDirect3DSurface9 *surf; /* game thread only */
 static HWND movie_hwnd;
 static int passthrough;
@@ -103,6 +106,16 @@ static Present_t oPresent; static PresentEx_t oPresentEx; static Reset_t oReset;
 static ResetEx_t oResetEx; static SCPresent_t oSCPresent;
 static int logged_present;
 
+/* forget the last frame, so neither draw_video nor GetCurrentImage can show
+ * a frame from the previous movie when the next one starts */
+static void drop_frame(void)
+{
+    EnterCriticalSection(&framelock);
+    HeapFree(GetProcessHeap(), 0, frame); frame = NULL; fw = fh = 0;
+    fresh = 0;
+    LeaveCriticalSection(&framelock);
+}
+
 static void release_surf(void)
 {
     if (surf) { IDirect3DSurface9_Release(surf); surf = NULL; }
@@ -112,7 +125,7 @@ static void release_surf(void)
 static void draw_video(IDirect3DDevice9 *dev, const char *via)
 {
     if (!playing) { release_surf(); return; }
-    if (!frame) return;
+    if (!frame || !fresh) return;
     /* the game hides its movie window to pause (skip prompt); show its frame then */
     if (movie_hwnd && !IsWindowVisible(movie_hwnd)) return;
     if (paused) return;
@@ -120,6 +133,7 @@ static void draw_video(IDirect3DDevice9 *dev, const char *via)
     if (last_grab && GetTickCount() - last_grab < 300) return;
     if (logged_present < 3) { LOG("drawing via %s", via); logged_present++; }
     EnterCriticalSection(&framelock);
+    if (!frame) { LeaveCriticalSection(&framelock); return; } /* dropped meanwhile */
     if (surf && (sw != fw || sh != fh)) release_surf();
     if (!surf) {
         if (FAILED(IDirect3DDevice9_CreateOffscreenPlainSurface(dev, fw, fh, D3DFMT_X8R8G8B8,
@@ -359,7 +373,7 @@ static void take_frame(Sink *s, IMFSample *smp)
         fw = s->w; fh = s->h;
     }
     for (UINT y = 0; y < s->h; y++) memcpy(frame + y * s->w * 4, src + (LONG)y * pitch, s->w * 4);
-    frame_dirty = 1; playing = 1;
+    frame_dirty = 1; playing = 1; fresh = 1;
     LeaveCriticalSection(&framelock);
     if (two) { IMF2DBuffer_Unlock2D(b2); IMF2DBuffer_Release(b2); }
     else IMFMediaBuffer_Unlock(buf);
@@ -451,7 +465,7 @@ static HRESULT WINAPI ms_Shutdown(IMFMediaSink *p)
     }
     IMFMediaEventQueue_Shutdown(s->events);
     LeaveCriticalSection(&s->cs);
-    playing = 0;
+    playing = 0; drop_frame();
     return S_OK;
 }
 static IMFMediaSinkVtbl ms_vtbl = {
@@ -576,7 +590,7 @@ static HRESULT WINAPI cs_OnClockStart(IMFClockStateSink *p, MFTIME sys, LONGLONG
     s->started = TRUE; s->outstanding = 0;
     IMFMediaEventQueue_QueueEventParamVar(s->events, MEStreamSinkStarted, &GUID_NULL, S_OK, NULL);
     LeaveCriticalSection(&s->cs);
-    movie_hwnd = s->hwnd; paused = 0;
+    movie_hwnd = s->hwnd; paused = 0; drop_frame();
     LOG("clock start");
     return S_OK;
 }
@@ -587,14 +601,14 @@ static HRESULT WINAPI cs_OnClockStop(IMFClockStateSink *p, MFTIME sys)
     s->started = FALSE; flush_locked(s); s->outstanding = 0;
     IMFMediaEventQueue_QueueEventParamVar(s->events, MEStreamSinkStopped, &GUID_NULL, S_OK, NULL);
     LeaveCriticalSection(&s->cs);
-    playing = 0;
+    playing = 0; drop_frame();
     LOG("clock stop");
     return S_OK;
 }
 static HRESULT WINAPI cs_OnClockPause(IMFClockStateSink *p, MFTIME sys)
 {
     LOG("clock pause");
-    paused = 1;
+    paused = 1; fresh = 0;
     Sink *s = from_IMFClockStateSink(p);
     EnterCriticalSection(&s->cs);
     s->started = FALSE;
@@ -605,7 +619,7 @@ static HRESULT WINAPI cs_OnClockPause(IMFClockStateSink *p, MFTIME sys)
 static HRESULT WINAPI cs_OnClockRestart(IMFClockStateSink *p, MFTIME sys)
 {
     LOG("clock restart");
-    paused = 0;
+    paused = 0; fresh = 0;
     Sink *s = from_IMFClockStateSink(p);
     EnterCriticalSection(&s->cs);
     s->started = TRUE;

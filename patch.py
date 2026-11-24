@@ -12,10 +12,14 @@ Patches (all on by default except quotes):
           and falls back to name.ext, but returns "this is x2" either way, so
           the callers halve the texture coords of a 1x fallback. Make it return
           whether the _x2 file actually exists, so deleted _x2 files just load 1x.
+  logos   Skip the boot logos. The title state machine (0x5e5330, state in
+          [this+0x28]) loads the logos in states 1-3, then shows them in
+          0xb-0x14. At the end of state 3 this jumps to the code that runs
+          after the last logo (0x5e6a2a), so it goes straight to the title.
   quotes  (opt-in) Remove the 5 s minimum on quote loading screens (#99 keeps
           its 7 s) by repointing the 5.0 constant at 0x63520f to -0.0.
 
-usage: patch.py [--no-mg] [--no-x2] [--quotes] [GAME_DIR]
+usage: patch.py [--no-mg] [--no-x2] [--no-logos] [--quotes] [GAME_DIR]
        patch.py --revert [GAME_DIR]   (restore the original exe, remove mg.dll)
 """
 import hashlib, os, shutil, sys
@@ -31,12 +35,14 @@ PATCHES = {
     'x2': [(0x23bd26, bytes.fromhex('83c4048d8df4feffff84c00f44ce51'),
                       bytes.fromhex('599384db0f44ce51' + '90' * 7)),
            (0x23bd4d, bytes.fromhex('b001'), bytes.fromhex('8ac3'))],
+    # 0x5e6630: call 0x7a47d0 -> jmp 0x5e6a2a
+    'logos': [(0x1e5a30, bytes.fromhex('e89be11b00'), bytes.fromhex('e9f5030000'))],
     'quotes': [(0x234618, bytes.fromhex('f30f100dc842bf00'), bytes.fromhex('f30f100d6085bf00'))],
 }
 
 args = sys.argv[1:]
-on = {'mg': True, 'x2': True, 'quotes': False}
-for f in ('--no-mg', '--no-x2'):
+on = {'mg': True, 'x2': True, 'logos': True, 'quotes': False}
+for f in ('--no-mg', '--no-x2', '--no-logos'):
     if f in args: args.remove(f); on[f[5:]] = False
 revert = '--revert' in args
 if revert: args.remove('--revert')
